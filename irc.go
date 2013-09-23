@@ -14,6 +14,15 @@ import (
 	"net"
 )
 
+var (
+	// Thrown if Dial() is called on an already established connection.
+	ErrAlreadyConnected = errors.New("already connected")
+	// Thrown if Close() is called on an already disconnected client.
+	ErrAlreadyDisconnected = errors.New("already disconnected")
+	// If a read or write op is issued on a disconnected client.
+	ErrNotConnected = errors.New("not connected")
+)
+
 type IRC struct {
 	Nick string // Nickname.
 	User string // Username/identd name.
@@ -32,12 +41,21 @@ type IRC struct {
 	OnNotice   func(message string, source, target Entity)
 	OnNick     func(newnick string, user Entity)
 	OnQuit     func(message string, user Entity)
+	OnError    func(message string)
+
+	OnServerWelcome   func(message string)
+	OnMessageOfTheDay func(message []string)
+
+	OnNickError func()
 
 	MaxMsgLen int  // Maximum message length in bytes that will be sent.
 	WriteRaw  bool // Write raw commands to stdout.
 
 	conn net.Conn      // TCP connection.
 	rbuf *bufio.Reader // Read buffer.
+
+	// Temp variables.
+	motd *[]string // MOTD combiner.
 }
 
 // Creates a new *IRC instance.
@@ -68,25 +86,42 @@ func New(nick, user, geck, mode string) (*IRC, error) {
 	}, nil
 }
 
-//
-func (i *IRC) Dial(raddr, password string, laddr *net.TCPAddr, tlscfg *tls.Config) error {
+// Connect to "addr" using optional "password" for IRC server.
+// "laddr" is an optional local address to bind to.
+// If tlscfg is not nil, a TLS secured connection is estblished.
+func (i *IRC) Dial(addr, password string, laddr *net.TCPAddr, tlscfg *tls.Config) error {
 	if i.conn != nil {
-		return nil
+		return ErrAlreadyConnected
 	}
-	a, err := net.ResolveTCPAddr("tcp", raddr)
+
+	a, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		fmt.Errorf("error resolving target addr: %s", err)
 	}
+
 	c, err := net.DialTCP("tcp", laddr, a)
 	if err != nil {
 		return err
 	}
-	i.conn = c
+
 	if tlscfg != nil {
-		i.conn = tls.Client(i.conn, tlscfg)
+		i.conn = tls.Client(c, tlscfg)
+	} else {
+		i.conn = c
 	}
+	i.rbuf = bufio.NewReader(i.conn)
 	i.pass = password
 	return nil
+}
+
+// Check if client is connected.
+func (i *IRC) Connected() bool {
+	return i.conn != nil
+}
+
+// Return connection for lower level access. Can return nil if disconnected.
+func (i *IRC) Conn() net.Conn {
+	return i.conn
 }
 
 // Runs the I/O loop.
@@ -94,13 +129,20 @@ func (i *IRC) Dial(raddr, password string, laddr *net.TCPAddr, tlscfg *tls.Confi
 // It should be run immediately if Dial() returns successfully to avoid
 // registration timeout. It may return an error at some point, either after
 // Close() is called from other goroutine or if a link error occurs.
+// Expect a disconnect error, io.EOF.
 func (i *IRC) Run() error {
 	if i.pass != "" {
-		i.SendRaw(fmt.Sprintf("PASS %s", i.pass))
+		if err := i.SendRaw(fmt.Sprintf("PASS %s", i.pass)); err != nil {
+			return err
+		}
 		i.pass = ""
 	}
-	i.SendRaw(fmt.Sprintf("NICK %s", i.Nick))
-	i.SendRaw(fmt.Sprintf("USER %s %s * :%s", i.User, i.Mode, i.Geck))
+	if err := i.SendRaw(fmt.Sprintf("NICK %s", i.Nick)); err != nil {
+		return err
+	}
+	if err := i.SendRaw(fmt.Sprintf("USER %s %s * :%s", i.User, i.Mode, i.Geck)); err != nil {
+		return err
+	}
 	for {
 		s, err := i.rbuf.ReadString('\n')
 		if err != nil {
@@ -113,43 +155,75 @@ func (i *IRC) Run() error {
 		if i.OnRaw != nil {
 			i.OnRaw(m, true)
 		}
-		switch m.Command() {
-		case "PING":
-			if m.HasTrailing() {
-				i.SendRaw(fmt.Sprintf("PONG :%s", m.Trailing()))
-			} else {
-				i.SendRaw("PONG")
+
+		if !m.IsNumeric() {
+			switch m.Command() {
+			case "PING":
+				if m.HasTrailing() {
+					i.SendRaw(fmt.Sprintf("PONG :%s", m.Trailing()))
+				} else {
+					i.SendRaw("PONG")
+				}
+				if i.OnPingPong != nil {
+					i.OnPingPong()
+				}
+			case "JOIN":
+				if i.OnJoin != nil {
+					i.OnJoin(m.Trailing(), *m.Prefix())
+				}
+			case "PART":
+				if i.OnPart != nil {
+					i.OnPart(m.Middle(), m.Trailing(), *m.Prefix())
+				}
+			case "KICK":
+				if i.OnKick != nil {
+					i.OnKick(m.Middle(), m.Trailing(), *m.Prefix())
+				}
+			case "PRIVMSG":
+				if i.OnPrivMsg != nil {
+					i.OnPrivMsg(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
+				}
+			case "NOTICE":
+				if i.OnNotice != nil {
+					i.OnNotice(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
+				}
+			case "NICK":
+				if i.OnNick != nil {
+					i.OnNick(m.Trailing(), *m.Prefix())
+				}
+			case "QUIT":
+				if i.OnQuit != nil {
+					i.OnQuit(m.Trailing(), *m.Prefix())
+				}
+			case "ERROR":
+				if i.OnError != nil {
+					i.OnError(m.Trailing())
+				}
 			}
-			if i.OnPingPong != nil {
-				i.OnPingPong()
-			}
-		case "JOIN":
-			if i.OnJoin != nil {
-				i.OnJoin(m.Trailing(), *m.Prefix())
-			}
-		case "PART":
-			if i.OnPart != nil {
-				i.OnPart(m.Middle(), m.Trailing(), *m.Prefix())
-			}
-		case "KICK":
-			if i.OnKick != nil {
-				i.OnKick(m.Middle(), m.Trailing(), *m.Prefix())
-			}
-		case "PRIVMSG":
-			if i.OnPrivMsg != nil {
-				i.OnPrivMsg(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
-			}
-		case "NOTICE":
-			if i.OnNotice != nil {
-				i.OnNotice(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
-			}
-		case "NICK":
-			if i.OnNick != nil {
-				i.OnNick(m.Trailing(), *m.Prefix())
-			}
-		case "QUIT":
-			if i.OnQuit != nil {
-				i.OnQuit(m.Trailing(), *m.Prefix())
+		} else {
+			switch m.Numeric() {
+			case 1: // Server welcome.
+				if i.OnServerWelcome != nil {
+					i.OnServerWelcome(m.Trailing())
+				}
+			case 372: // MOTD line.
+				if i.OnMessageOfTheDay != nil && i.motd != nil {
+					*i.motd = append(*i.motd, m.Trailing())
+				}
+			case 375: // MOTD start.
+				if i.OnMessageOfTheDay != nil {
+					a := make([]string, 1)
+					i.motd = &a
+				}
+			case 376: // MOTD end.
+				if i.OnMessageOfTheDay != nil && i.motd != nil {
+					i.OnMessageOfTheDay(*i.motd)
+				}
+				i.motd = nil
+			case 433: // Nick error.
+				if i.OnNickError != nil {
+					i.OnNickError()
+				}
 			}
 		}
 	}
@@ -158,7 +232,7 @@ func (i *IRC) Run() error {
 // Closes the IRC connection.
 func (i *IRC) Close() error {
 	if i.conn == nil {
-		return nil
+		return ErrAlreadyDisconnected
 	}
 	err := i.conn.Close()
 	i.conn = nil
@@ -169,7 +243,7 @@ func (i *IRC) Close() error {
 // Send a "raw" command to server.
 func (i *IRC) SendRaw(raw string) error {
 	if i.conn == nil {
-		return errors.New("not connected")
+		return ErrNotConnected
 	}
 	if raw == "" {
 		return nil
