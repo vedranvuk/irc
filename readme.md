@@ -25,8 +25,8 @@ internals but no breaking changes planned.
 			log.Fatalf("error creating new irc client: %s", err)
 		}
 		cli.WriteRaw = true
-		cli.OnServerWelcome = func(message string) {
-			cli.CmdJoin("#somechannel", "")
+		cli.OnServerWelcome = func(i *irc.IRC, message string) {
+			i.CmdJoin("#somechannel", "")
 		}
 		
 		err = cli.Dial("irc.myircnetwork.com:6667", "", nil, nil)

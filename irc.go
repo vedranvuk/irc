@@ -32,21 +32,21 @@ type IRC struct {
 	pass string // Server password.
 
 	// Event handlers.
-	OnRaw      func(m Message, in bool)
-	OnPingPong func()
-	OnJoin     func(channel string, user Entity)
-	OnPart     func(channel, message string, user Entity)
-	OnKick     func(channel, message string, user Entity)
-	OnPrivMsg  func(message string, source, target Entity)
-	OnNotice   func(message string, source, target Entity)
-	OnNick     func(newnick string, user Entity)
-	OnQuit     func(message string, user Entity)
-	OnError    func(message string)
+	OnRaw      func(i *IRC, m Message, in bool)
+	OnPingPong func(i *IRC)
+	OnJoin     func(i *IRC, channel string, user Entity)
+	OnPart     func(i *IRC, channel, message string, user Entity)
+	OnKick     func(i *IRC, channel, message string, user Entity)
+	OnPrivMsg  func(i *IRC, message string, source, target Entity)
+	OnNotice   func(i *IRC, message string, source, target Entity)
+	OnNick     func(i *IRC, newnick string, user Entity)
+	OnQuit     func(i *IRC, message string, user Entity)
+	OnError    func(i *IRC, message string)
 
-	OnServerWelcome   func(message string)
-	OnMessageOfTheDay func(message []string)
+	OnServerWelcome   func(i *IRC, message string)
+	OnMessageOfTheDay func(i *IRC, message []string)
 
-	OnNickError func()
+	OnNickError func(i *IRC)
 
 	MaxMsgLen int  // Maximum message length in bytes that will be sent.
 	WriteRaw  bool // Write raw commands to stdout.
@@ -153,7 +153,7 @@ func (i *IRC) Run() error {
 		}
 		m := NewMessage(s)
 		if i.OnRaw != nil {
-			i.OnRaw(m, true)
+			i.OnRaw(i, m, true)
 		}
 
 		if !m.IsNumeric() {
@@ -165,46 +165,46 @@ func (i *IRC) Run() error {
 					i.SendRaw("PONG")
 				}
 				if i.OnPingPong != nil {
-					i.OnPingPong()
+					i.OnPingPong(i)
 				}
 			case "JOIN":
 				if i.OnJoin != nil {
-					i.OnJoin(m.Trailing(), *m.Prefix())
+					i.OnJoin(i, m.Trailing(), *m.Prefix())
 				}
 			case "PART":
 				if i.OnPart != nil {
-					i.OnPart(m.Middle(), m.Trailing(), *m.Prefix())
+					i.OnPart(i, m.Middle(), m.Trailing(), *m.Prefix())
 				}
 			case "KICK":
 				if i.OnKick != nil {
-					i.OnKick(m.Middle(), m.Trailing(), *m.Prefix())
+					i.OnKick(i, m.Middle(), m.Trailing(), *m.Prefix())
 				}
 			case "PRIVMSG":
 				if i.OnPrivMsg != nil {
-					i.OnPrivMsg(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
+					i.OnPrivMsg(i, m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
 				}
 			case "NOTICE":
 				if i.OnNotice != nil {
-					i.OnNotice(m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
+					i.OnNotice(i, m.Trailing(), *m.Prefix(), NewEntity(m.Middles()[0]))
 				}
 			case "NICK":
 				if i.OnNick != nil {
-					i.OnNick(m.Trailing(), *m.Prefix())
+					i.OnNick(i, m.Trailing(), *m.Prefix())
 				}
 			case "QUIT":
 				if i.OnQuit != nil {
-					i.OnQuit(m.Trailing(), *m.Prefix())
+					i.OnQuit(i, m.Trailing(), *m.Prefix())
 				}
 			case "ERROR":
 				if i.OnError != nil {
-					i.OnError(m.Trailing())
+					i.OnError(i, m.Trailing())
 				}
 			}
 		} else {
 			switch m.Numeric() {
 			case 1: // Server welcome.
 				if i.OnServerWelcome != nil {
-					i.OnServerWelcome(m.Trailing())
+					i.OnServerWelcome(i, m.Trailing())
 				}
 			case 372: // MOTD line.
 				if i.OnMessageOfTheDay != nil && i.motd != nil {
@@ -217,12 +217,12 @@ func (i *IRC) Run() error {
 				}
 			case 376: // MOTD end.
 				if i.OnMessageOfTheDay != nil && i.motd != nil {
-					i.OnMessageOfTheDay(*i.motd)
+					i.OnMessageOfTheDay(i, *i.motd)
 				}
 				i.motd = nil
 			case 433: // Nick error.
 				if i.OnNickError != nil {
-					i.OnNickError()
+					i.OnNickError(i)
 				}
 			}
 		}
@@ -253,7 +253,7 @@ func (i *IRC) SendRaw(raw string) error {
 		fmt.Printf(" <- %s", s)
 	}
 	if i.OnRaw != nil {
-		i.OnRaw(NewMessage(s), false)
+		i.OnRaw(i, NewMessage(s), false)
 	}
 	b := []byte(s)
 	n, err := i.conn.Write(b)
