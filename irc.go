@@ -12,6 +12,7 @@ import (
 	"fmt"
 	stringsex "github.com/vedranvuk/strings"
 	"net"
+	"time"
 )
 
 var (
@@ -49,6 +50,7 @@ type IRC struct {
 	OnNickError func(i *IRC)
 
 	MaxMsgLen int  // Maximum message length in bytes that will be sent.
+	RWTimeout int  // Connection read/write timeout.
 	WriteRaw  bool // Write raw commands to stdout.
 
 	conn net.Conn      // TCP connection.
@@ -83,6 +85,7 @@ func New(nick, user, geck, mode string) (*IRC, error) {
 		Geck:      geck,
 		Mode:      mode,
 		MaxMsgLen: 400,
+		RWTimeout: 180,
 	}, nil
 }
 
@@ -124,6 +127,15 @@ func (i *IRC) Conn() net.Conn {
 	return i.conn
 }
 
+// Set read/write timeout value in "seconds" for the connection. Default is 180.
+func (i *IRC) SetRWTimeout(seconds int) error {
+	if seconds <= 0 {
+		return errors.New("invalid timeout value, must be => 1")
+	}
+	i.RWTimeout = seconds
+	return nil
+}
+
 // Runs the I/O loop.
 // This blocking function does the initial registration then runs the read loop.
 // It should be run immediately if Dial() returns successfully to avoid
@@ -144,6 +156,7 @@ func (i *IRC) Run() error {
 		return err
 	}
 	for {
+		i.conn.SetReadDeadline(time.Now().Add(time.Duration(i.RWTimeout) * time.Second))
 		s, err := i.rbuf.ReadString('\n')
 		if err != nil {
 			return err
@@ -250,11 +263,12 @@ func (i *IRC) SendRaw(raw string) error {
 	}
 	s := fmt.Sprintf("%s\r\n", stringsex.LenLimitByRune(raw, i.MaxMsgLen))
 	if i.WriteRaw {
-		fmt.Printf(" <- %s", s)
+		fmt.Printf("<- %s", s)
 	}
 	if i.OnRaw != nil {
 		i.OnRaw(i, NewMessage(s), false)
 	}
+	i.conn.SetWriteDeadline(time.Now().Add(time.Duration(i.RWTimeout) * time.Second))
 	b := []byte(s)
 	n, err := i.conn.Write(b)
 	if err != nil {

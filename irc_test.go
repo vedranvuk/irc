@@ -1,6 +1,7 @@
 package irc
 
 import (
+	"fmt"
 	"testing"
 )
 
